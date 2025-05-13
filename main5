@@ -1,0 +1,379 @@
+from langgraph.graph import StateGraph, END
+from langchain_openai import ChatOpenAI
+from typing_extensions import TypedDict
+from dotenv import load_dotenv
+from typing import Dict, List
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain.chains import RetrievalQA
+from langchain.schema import Document
+from langchain.prompts import PromptTemplate
+load_dotenv()
+
+# Initialize LLM and Retrieval System
+llm = ChatOpenAI(model="gpt-4", temperature=0.7)
+
+# Define categories for interview questions
+# Define the question database with categories and questions
+interview_questions = {
+    "intro": [
+        {
+            "question": "Tell me about yourself.",
+            "context": "This is a common introductory question in interviews."
+        },
+        {
+            "question": "What are your greatest strengths?",
+            "context": "This question helps assess self-awareness and confidence."
+        },
+        {
+            "question": "How would your colleagues describe you?",
+            "context": "This reveals interpersonal skills and self-perception."
+        },
+        {
+            "question": "Why are you interested in this position?",
+            "context": "This evaluates motivation and job fit."
+        }
+    ],
+    "tech": [
+        {
+            "question": "What technologies are you most comfortable with?",
+            "context": "This question assesses technical expertise."
+        },
+        {
+            "question": "Describe a technical project you're particularly proud of.",
+            "context": "This reveals technical accomplishments and communication skills."
+        },
+        {
+            "question": "How do you stay updated with the latest developments in technology?",
+            "context": "This evaluates learning habits and professional development."
+        },
+        {
+            "question": "How would you explain a complex technical concept to a non-technical person?",
+            "context": "This tests communication skills and technical understanding."
+        }
+    ],
+    "behavior": [
+        {
+            "question": "Tell me about a time you faced a challenge at work.",
+            "context": "This question evaluates problem-solving skills."
+        },
+        {
+            "question": "Describe a situation where you had to work under pressure.",
+            "context": "This evaluates performance under stress."
+        },
+        {
+            "question": "Give me an example of a time you made a mistake at work.",
+            "context": "This assesses accountability and learning from failures."
+        },
+        {
+            "question": "Tell me about a time you had to collaborate with a difficult teammate.",
+            "context": "This evaluates interpersonal skills and conflict resolution."
+        }
+    ]
+}
+
+# Initialize embeddings
+embeddings = OpenAIEmbeddings()
+
+# Create documents from the structured question database
+documents = []
+
+# Add category descriptions
+for category, questions in interview_questions.items():
+    # Add category description
+    category_descriptions = {
+        "intro": "Introduction questions help understand the candidate's background and communication style.",
+        "tech": "Technical questions assess the candidate's skills, experience, and problem-solving abilities.",
+        "behavior": "Behavioral questions evaluate past performance, soft skills, and cultural fit."
+    }
+    
+    documents.append(Document(
+        page_content=category_descriptions.get(category, f"Questions related to {category}"),
+        metadata={"category": category, "type": "description"}
+    ))
+    
+    # Add individual questions with their context
+    for item in questions:
+        documents.append(Document(
+            page_content=item["question"],
+            metadata={
+                "category": category, 
+                "type": "question", 
+                "context": item["context"]
+            }
+        ))
+
+# Create a FAISS index and store the embeddings
+vector_store = FAISS.from_documents(documents, embeddings)
+vector_store.save_local("interview_questions_index")
+
+# Setup retriever with FAISS index
+retriever = vector_store.as_retriever(
+    search_kwargs={"k": 3},  # Retrieve top 3 relevant results
+    search_type="similarity"
+)
+
+# Define state structure
+class InterviewState(TypedDict):
+    intro: str
+    current_stage: str
+    stage_answers: Dict[str, List[str]]
+
+class State(TypedDict):
+    interview: InterviewState
+    report: Dict[str, str]
+
+# Create a function to get a relevant question using RAG
+def get_question_from_rag(category: str) -> tuple:
+    # Query the vector store for questions in this category
+    query = f"Find a good {category} question for an interview"
+    docs = retriever.get_relevant_documents(query)
+    
+    # Filter for question type documents in the right category
+    relevant_docs = [
+        doc for doc in docs 
+        if doc.metadata.get("category") == category and doc.metadata.get("type") == "question"
+    ]
+    
+    # If we found relevant questions, use one
+    if relevant_docs:
+        # Choose a question (randomly or the most relevant one)
+        selected_doc = relevant_docs[0]  # Use the most relevant one
+        question = selected_doc.page_content
+        context = selected_doc.metadata.get("context", "")
+        return question, context
+    
+
+# Node functions that use RAG to get questions
+def intro_agent(state: Dict) -> Dict:
+    # Get a relevant introduction question from the RAG system
+    question, context = get_question_from_rag("intro")
+    
+    print(f"AI: {question}")
+    user_input = input("You: ")
+    state["interview"]["intro"] = user_input
+    state["interview"]["stage_answers"]["intro"].append(user_input)
+    state["interview"]["current_stage"] = "intro_followup"
+    
+    # Store the question and context for future use
+    if "questions" not in state["interview"]:
+        state["interview"]["questions"] = {}
+    state["interview"]["questions"]["intro"] = {"question": question, "context": context}
+    
+    return {"interview": state["interview"]}
+
+def tech_question_agent(state: Dict) -> Dict:
+    # Get a relevant technical question from the RAG system
+    question, context = get_question_from_rag("tech")
+    
+    print(f"AI: {question}")
+    user_input = input("You: ")
+    state["interview"]["stage_answers"]["tech"].append(user_input)
+    state["interview"]["current_stage"] = "tech_followup"
+    
+    # Store the question and context for future use
+    if "questions" not in state["interview"]:
+        state["interview"]["questions"] = {}
+    state["interview"]["questions"]["tech"] = {"question": question, "context": context}
+    
+    return {"interview": state["interview"]}
+
+def behavior_question_agent(state: Dict) -> Dict:
+    # Get a relevant behavioral question from the RAG system
+    question, context = get_question_from_rag("behavior")
+    
+    print(f"AI: {question}")
+    user_input = input("You: ")
+    state["interview"]["stage_answers"]["behavior"].append(user_input)
+    state["interview"]["current_stage"] = "behavior_followup"
+    
+    # Store the question and context for future use
+    if "questions" not in state["interview"]:
+        state["interview"]["questions"] = {}
+    state["interview"]["questions"]["behavior"] = {"question": question, "context": context}
+    
+    return {"interview": state["interview"]}
+
+def followup_agent(state: Dict) -> Dict:
+    stage = state["interview"]["current_stage"].replace("_followup", "")
+    last_answer = state["interview"]["stage_answers"][stage][-1]
+    
+    # Create a RAG chain to retrieve relevant context for generating a follow-up
+    follow_up_template = PromptTemplate(
+        input_variables=["answer", "category"],
+        template="""
+        You're an interviewer conducting a {category} interview.
+        Create a thoughtful follow-up question for this response: "{answer}"
+        Make your follow-up question specific to what they mentioned and help them elaborate.
+        """
+    )
+    
+    # Generate follow-up based on the candidate's answer
+    prompt = follow_up_template.format(
+        answer=last_answer,
+        category=stage
+    )
+    
+    followup_question = llm.invoke(prompt).content.strip()
+
+    print(f"\nAI: {followup_question}")
+    user_input = input("You: ")
+    state["interview"]["stage_answers"][stage].append(user_input)
+
+    # Decide next stage
+    if stage == "intro":
+        state["interview"]["current_stage"] = "tech"
+    elif stage == "tech":
+        state["interview"]["current_stage"] = "behavior"
+    elif stage == "behavior":
+        state["interview"]["current_stage"] = "complete"
+
+    return {"interview": state["interview"]}
+
+def report_generator_with_rag(state: Dict) -> Dict:
+    report_content = "## Interview Report\n\n"
+    
+    # Create a RetrievalQA chain for analyzing responses
+    analysis_chain = RetrievalQA.from_chain_type(
+        llm=ChatOpenAI(model="gpt-4"), 
+        retriever=retriever,
+        chain_type_kwargs={
+            "prompt": PromptTemplate(
+                template="""
+                You are an expert interviewer analyzing candidate responses. The candidate was asked:
+                "{question}"
+                
+                The candidate responded:
+                "{answer}"
+                
+                Question context: {context}
+                
+                Please provide a brief analysis of this response, highlighting strengths and areas for improvement:
+                """,
+                input_variables=["question", "answer", "context"]
+            )
+        }
+    )
+    
+    def get_score_and_reason(section_name: str, answers: List[str], question: str = "", context: str = "") -> str:
+        combined = " ".join(answers)
+        prompt = f"""
+        You are a professional interviewer. Evaluate the following response(s) for this interview question:
+        
+        Question: "{question}"
+        Question context: {context}
+        
+        Candidate response(s):
+        \"\"\"{combined}\"\"\" 
+
+        Format:
+        Reason: <short reason>
+        Score: <number>/10
+        """
+        result = llm.invoke(prompt).content.strip()
+        return result
+
+    def append_section(section_title: str, answers: List[str]):
+        nonlocal report_content
+        if not answers:
+            return
+        
+        # Get the original question and context if available
+        category = section_title.lower().replace(" ", "_")
+        if category == "introduction":
+            category = "intro"
+            
+        question_info = state["interview"].get("questions", {}).get(category, {})
+        original_question = question_info.get("question", "Unknown question")
+        question_context = question_info.get("context", "")
+        
+        report_content += f"### {section_title}\n"
+        report_content += f"**Question Asked**: {original_question}\n\n"
+        report_content += f"**Primary Response**: {answers[0]}\n\n"
+        if len(answers) > 1:
+            report_content += f"**Follow-up Response**: {answers[1]}\n\n"
+        
+        # Get analysis using RAG with question context
+        analysis = analysis_chain.invoke({
+            "question": original_question,
+            "answer": " ".join(answers),
+            "context": question_context
+        })
+        report_content += f"**Analysis**: {analysis}\n\n"
+        
+        # Add scoring and reasoning
+        score_feedback = get_score_and_reason(section_title, answers, original_question, question_context)
+        report_content += f"**Evaluation**: {score_feedback}\n\n"
+
+    append_section("Introduction", state["interview"]["stage_answers"]["intro"])
+    append_section("Technical Skills", state["interview"]["stage_answers"]["tech"])
+    append_section("Behavioral Assessment", state["interview"]["stage_answers"]["behavior"])
+    
+    # Add overall assessment
+    all_answers = []
+    all_answers.extend(state["interview"]["stage_answers"]["intro"])
+    all_answers.extend(state["interview"]["stage_answers"]["tech"])
+    all_answers.extend(state["interview"]["stage_answers"]["behavior"])
+    
+    overall_prompt = f"""
+    You are a professional interviewer. Based on all the candidate's responses throughout the interview, provide a brief overall assessment.
+    
+    The candidate's responses:
+    \"\"\"{' '.join(all_answers)}\"\"\"
+    
+    Format your response as:
+    Overall assessment: <2-3 sentence assessment>
+    Strengths: <brief bullet points>
+    Areas for improvement: <brief bullet points>
+    Final recommendation: <brief recommendation on hiring>
+    """
+    
+    overall_assessment = llm.invoke(overall_prompt).content.strip()
+    report_content += f"## Overall Assessment\n\n{overall_assessment}\n\n"
+
+    print("\n Final Interview Report:")
+    print(report_content)
+
+    return {"report": {"content": report_content}}
+
+# Build graph
+builder = StateGraph(State)
+
+# Add nodes
+builder.add_node("intro", intro_agent)
+builder.add_node("intro_followup", followup_agent)
+builder.add_node("tech_question", tech_question_agent)
+builder.add_node("tech_followup", followup_agent)
+builder.add_node("behavior_question", behavior_question_agent)
+builder.add_node("behavior_followup", followup_agent)
+builder.add_node("report_generator", report_generator_with_rag)
+
+# Set entry
+builder.set_entry_point("intro")
+
+# Transitions
+builder.add_edge("intro", "intro_followup")
+builder.add_edge("intro_followup", "tech_question")
+builder.add_edge("tech_question", "tech_followup")
+builder.add_edge("tech_followup", "behavior_question")
+builder.add_edge("behavior_question", "behavior_followup")
+builder.add_edge("behavior_followup", "report_generator")
+builder.add_edge("report_generator", END)
+
+# Initialize interview state
+initial_state = {
+    "interview": {
+        "intro": "",
+        "current_stage": "intro",
+        "stage_answers": {
+            "intro": [],
+            "tech": [],
+            "behavior": []
+        }
+    },
+    "report": {}
+}
+
+# Compile and run
+graph = builder.compile()
+graph.invoke(initial_state)
